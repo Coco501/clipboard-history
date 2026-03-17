@@ -2,7 +2,7 @@
 
 A lightweight clipboard history manager for Linux. Runs as a background daemon, captures everything you copy (text and images), and surfaces it in a fast keyboard-driven picker.
 
-![Clipboard History picker](https://raw.githubusercontent.com/yourusername/clipboard-history/main/screenshot.png)
+![Clipboard History picker](assets/screenshot.png)
 
 ## Features
 
