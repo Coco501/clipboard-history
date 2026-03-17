@@ -1,0 +1,23 @@
+# clipboard-history Python dependencies
+#
+# All required dependencies are system packages installed by install.sh:
+#   - python3        (runtime)
+#   - python3-tk     (GUI — tkinter)
+#   - wl-clipboard   (Wayland clipboard: wl-paste, wl-copy)
+#   - xclip          (X11 clipboard fallback)
+#
+# No pip packages are required for core functionality.
+#
+# Optional pip package for image thumbnail rendering in the picker UI:
+#
+#   Pillow>=9.0.0   (python3-pil.imagetk on Debian/Ubuntu)
+#
+#   sudo apt install python3-pil python3-pil.imagetk
+#
+# Without Pillow, images are captured and pasted correctly but show as
+# "[Image — date]" placeholders in the picker instead of thumbnails.
+#
+# Optional pip package for X11 global hotkey support (not needed on GNOME Wayland,
+# which uses gsettings custom keybindings instead):
+#
+#   pynput>=1.7.0
