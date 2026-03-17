@@ -102,3 +102,6 @@ clipboard_history/
 - `python3-tk`
 - `wl-clipboard` (Wayland) **or** `xclip` (X11)
 - `Pillow` *(optional — image thumbnails)*
+
+## Disclaimer
+This project was written almost entirely by Claude, so please take it with a grain of salt
