@@ -61,22 +61,74 @@ def _get_current_monitor(root):
     except Exception:
         return fallback
 
-    def _parse_monitors(cmd):
-        """Run cmd and extract [(mx, my, mw, mh), ...] from WxH+X+Y tokens."""
+    def _run(cmd):
         try:
-            out = subprocess.run(cmd, capture_output=True, text=True, timeout=2).stdout
+            return subprocess.run(cmd, capture_output=True, text=True, timeout=2).stdout
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-            return []
+            return ""
+
+    def _xrandr_monitors():
+        """Parse xrandr --query: matches connected outputs with WxH+X+Y geometry."""
         monitors = []
-        for m in re.finditer(r'(\d+)x(\d+)\+(\d+)\+(\d+)', out):
+        for m in re.finditer(r'(\d+)x(\d+)\+(\d+)\+(\d+)', _run(["xrandr", "--query"])):
             mw, mh, mx, my = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
             if mw > 0 and mh > 0:
                 monitors.append((mx, my, mw, mh))
         return monitors
 
-    # Try xrandr (X11 / XWayland), then wlr-randr (wlroots Wayland compositors).
-    monitors = _parse_monitors(["xrandr", "--query"]) or \
-               _parse_monitors(["wlr-randr"])
+    def _wlr_randr_monitors():
+        """Parse wlr-randr output.
+
+        wlr-randr uses a different format than xrandr: each monitor block starts
+        with a non-indented connector line, followed by indented mode lines
+        (e.g. '  2560x1440 px, 60.00 Hz (current, preferred)') and property
+        lines (e.g. '  Position: 0,1440'). The WxH+X+Y regex used for xrandr
+        does not match this format at all.
+        """
+        monitors, cur_res = [], None
+        for line in _run(["wlr-randr"]).splitlines():
+            stripped = line.strip()
+            if line and not line[0].isspace():
+                cur_res = None  # new monitor block — reset resolution
+            # First mode line with "(current" marks the active resolution.
+            if cur_res is None:
+                m = re.match(r'(\d+)x(\d+)\s+px.*\bcurrent\b', stripped)
+                if m:
+                    cur_res = (int(m.group(1)), int(m.group(2)))
+            # "Position: X,Y" — associate with current resolution.
+            m = re.match(r'Position:\s*(-?\d+),(-?\d+)', stripped)
+            if m and cur_res:
+                monitors.append((int(m.group(1)), int(m.group(2)), cur_res[0], cur_res[1]))
+                cur_res = None
+        return monitors
+
+    def _sway_monitors():
+        """Parse swaymsg -t get_outputs JSON (Sway compositor)."""
+        import json
+        try:
+            outputs = json.loads(_run(["swaymsg", "-t", "get_outputs"]))
+            return [(o["rect"]["x"], o["rect"]["y"], o["rect"]["width"], o["rect"]["height"])
+                    for o in outputs if o.get("active") and o.get("rect")]
+        except Exception:
+            return []
+
+    def _hyprland_monitors():
+        """Parse hyprctl monitors -j JSON (Hyprland compositor)."""
+        import json
+        try:
+            outputs = json.loads(_run(["hyprctl", "monitors", "-j"]))
+            return [(o["x"], o["y"], o["width"], o["height"])
+                    for o in outputs if o.get("width", 0) > 0]
+        except Exception:
+            return []
+
+    # Try each detection method in order; stop at the first that returns results.
+    monitors = (
+        _xrandr_monitors() or
+        _wlr_randr_monitors() or
+        _sway_monitors() or
+        _hyprland_monitors()
+    )
 
     for mx, my, mw, mh in monitors:
         if mx <= cx < mx + mw and my <= cy < my + mh:
