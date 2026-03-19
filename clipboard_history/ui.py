@@ -191,7 +191,7 @@ def cmd_show() -> None:
 
     search_canvas.bind("<Configure>", _on_search_configure)
     search_entry.bind("<FocusIn>",  lambda e: _draw_search_bg(C["accent"]))
-    search_entry.bind("<FocusOut>", lambda e: _draw_search_bg(C["overlay"]))
+    search_entry.bind("<FocusOut>", lambda e: _rebuilding[0] or _draw_search_bg(C["overlay"]))
 
     # ── Scrollable item list ───────────────────────────────────────────────────
 
@@ -233,6 +233,7 @@ def cmd_show() -> None:
     current_rows   = []   # list of (row_frame, primary_widget, xbtn)
     selected_idx   = [0]
     _photo_refs    = []   # prevents Tk from GC-ing PhotoImage objects
+    _rebuilding    = [False]  # suppresses FocusOut border flicker during list rebuild
 
     # ── Theme application ─────────────────────────────────────────────────────
 
@@ -454,15 +455,21 @@ def cmd_show() -> None:
         changed = (len(new_items) != len(items) or
                    (new_items and (not items or new_items[0] != items[0])))
         if changed:
-            # _populate() destroys and recreates list widgets, which temporarily
-            # shifts Tk focus and fires FocusOut on search_entry, causing the
-            # border to flicker grey. Restore focus explicitly afterwards.
+            # _populate() destroys and recreates list widgets, which can fire
+            # FocusOut on search_entry and turn the border grey. When the newest
+            # item is an image, PhotoImage GC during _photo_refs.clear() triggers
+            # an intermediate Tk flush that makes the grey border briefly visible
+            # even with focus restored immediately after. Fix: suppress the
+            # FocusOut border update via _rebuilding flag, and clear it only
+            # after all pending events (including FocusIn) have been processed.
             focused = root.focus_get()
             items.clear()
             items.extend(new_items)
+            _rebuilding[0] = True
             _filter()
             if focused:
                 focused.focus_set()
+            root.after(0, lambda: _rebuilding.__setitem__(0, False))
 
     # ── Keyboard handling ─────────────────────────────────────────────────────
 
