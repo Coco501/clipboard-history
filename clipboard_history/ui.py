@@ -1,5 +1,8 @@
 """Tkinter picker UI — shown when the user opens clipboard history."""
 
+import ctypes
+import ctypes.util
+import os
 import re
 import subprocess
 import sys
@@ -57,20 +60,25 @@ def _get_current_monitor(root):
         cx, cy = root.winfo_pointerx(), root.winfo_pointery()
     except Exception:
         return fallback
-    try:
-        result = subprocess.run(["xrandr", "--query"], capture_output=True, text=True, timeout=2)
-        if result.returncode != 0:
-            return fallback
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return fallback
 
-    for line in result.stdout.splitlines():
-        if "connected" not in line:
-            continue
-        m = re.search(r'(\d+)x(\d+)\+(\d+)\+(\d+)', line)
-        if not m:
-            continue
-        mw, mh, mx, my = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
+    def _parse_monitors(cmd):
+        """Run cmd and extract [(mx, my, mw, mh), ...] from WxH+X+Y tokens."""
+        try:
+            out = subprocess.run(cmd, capture_output=True, text=True, timeout=2).stdout
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            return []
+        monitors = []
+        for m in re.finditer(r'(\d+)x(\d+)\+(\d+)\+(\d+)', out):
+            mw, mh, mx, my = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
+            if mw > 0 and mh > 0:
+                monitors.append((mx, my, mw, mh))
+        return monitors
+
+    # Try xrandr (X11 / XWayland), then wlr-randr (wlroots Wayland compositors).
+    monitors = _parse_monitors(["xrandr", "--query"]) or \
+               _parse_monitors(["wlr-randr"])
+
+    for mx, my, mw, mh in monitors:
         if mx <= cx < mx + mw and my <= cy < my + mh:
             return (mx, my, mw, mh)
     return fallback
@@ -134,6 +142,11 @@ def cmd_show() -> None:
                          fg=C["subtext"], bg=C["bg"],
                          font=("Sans Serif", 13), cursor="hand2", padx=6)
     theme_btn.pack(side=tk.RIGHT)
+
+    clear_btn = tk.Label(header, text="🧹",
+                         fg=C["subtext"], bg=C["bg"],
+                         font=("Sans Serif", 13), cursor="hand2", padx=6)
+    clear_btn.pack(side=tk.RIGHT)
 
     count_var = tk.StringVar(value=f"{len(items)} items")
     count_lbl = tk.Label(header, textvariable=count_var,
@@ -372,6 +385,18 @@ def cmd_show() -> None:
         if source:
             _set_selection(0, scroll=False)
 
+    def _do_clear_history():
+        for item in items:
+            if item.get("type") == "image":
+                try:
+                    Path(item["path"]).unlink(missing_ok=True)
+                except OSError:
+                    pass
+        save_history([])
+        items.clear()
+        search_var.set("")
+        _filter()
+
     def _filter(*_):
         q = search_var.get().lower()
         if not q:
@@ -421,16 +446,23 @@ def cmd_show() -> None:
         if filtered_items:
             _set_selection(min(index, len(filtered_items) - 1))
 
-    def _refresh_history():
-        """Reload history from disk every 2 s to pick up daemon additions."""
+    def _reload_history(_fd=None, _mask=None):
+        """Reload history from disk when the history file changes (inotify callback)."""
+        if _fd is not None:
+            os.read(_fd, 4096)  # drain inotify events
         new_items = load_history()
         changed = (len(new_items) != len(items) or
                    (new_items and (not items or new_items[0] != items[0])))
         if changed:
+            # _populate() destroys and recreates list widgets, which temporarily
+            # shifts Tk focus and fires FocusOut on search_entry, causing the
+            # border to flicker grey. Restore focus explicitly afterwards.
+            focused = root.focus_get()
             items.clear()
             items.extend(new_items)
             _filter()
-        root.after(2000, _refresh_history)
+            if focused:
+                focused.focus_set()
 
     # ── Keyboard handling ─────────────────────────────────────────────────────
 
@@ -456,14 +488,46 @@ def cmd_show() -> None:
     root.bind("<Key>", _on_key)
     for seq in ("<Down>", "<Up>", "<Control-j>", "<Control-k>"):
         search_entry.bind(seq, _on_key)
-    search_entry.bind("<Return>", lambda e: _do_paste())
+    def _on_search_return(e=None):
+        if search_var.get() == "/clear":
+            _do_clear_history()
+        else:
+            _do_paste()
+    search_entry.bind("<Return>", _on_search_return)
     search_entry.bind("<Escape>", lambda e: root.destroy())
     root.bind("<Control-w>", lambda e: root.destroy())
+
+    clear_btn.bind("<Button-1>", lambda e: _do_clear_history())
+    clear_btn.bind("<Enter>", lambda e: clear_btn.configure(fg=C["accent"]))
+    clear_btn.bind("<Leave>", lambda e: clear_btn.configure(fg=C["subtext"]))
 
     # ── Start ─────────────────────────────────────────────────────────────────
 
     _populate(items)
-    root.after(2000, _refresh_history)
+
+    # Watch for history changes via inotify — no polling, no flickering.
+    # save_history() uses os.replace(tmp → history.json), which is an atomic
+    # rename. Renames fire IN_MOVED_TO on the parent directory, not
+    # IN_CLOSE_WRITE on the file, so we watch the directory instead.
+    from .config import HISTORY_FILE
+    _inotify_fd = None
+    _libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+    _ifd = _libc.inotify_init()
+    if _ifd >= 0:
+        IN_MOVED_TO = 0x00000080
+        _libc.inotify_add_watch(_ifd, str(HISTORY_FILE.parent).encode(), IN_MOVED_TO)
+        root.tk.createfilehandler(_ifd, tk.READABLE, _reload_history)
+        _inotify_fd = _ifd
+
+    def _cleanup_inotify():
+        if _inotify_fd is not None:
+            try:
+                root.tk.deletefilehandler(_inotify_fd)
+            except Exception:
+                pass
+            os.close(_inotify_fd)
+
+    root.protocol("WM_DELETE_WINDOW", lambda: (_cleanup_inotify(), root.destroy()))
 
     def _grab_focus():
         root.lift()

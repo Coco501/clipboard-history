@@ -128,6 +128,103 @@ fi
 
 # ── 4. Register Super+V keyboard shortcut ─────────────────────────────────────
 
+# Check if Super+V is already bound to something before we register it.
+check_superv_conflict() {
+    local conflict=""
+
+    # ── GNOME ──────────────────────────────────────────────────────────────────
+    if command -v gsettings &>/dev/null && \
+       gsettings list-schemas 2>/dev/null | grep -q "org.gnome.settings-daemon"; then
+
+        # Custom keybindings
+        local paths_raw
+        paths_raw=$(gsettings get org.gnome.settings-daemon.plugins.media-keys \
+                        custom-keybindings 2>/dev/null || echo "")
+        while IFS= read -r path; do
+            local binding
+            binding=$(gsettings get \
+                "org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:${path}" \
+                binding 2>/dev/null || echo "")
+            if echo "$binding" | grep -qi "<Super>v"; then
+                local name
+                name=$(gsettings get \
+                    "org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:${path}" \
+                    name 2>/dev/null | tr -d "'")
+                conflict="GNOME custom shortcut: '${name}'"
+            fi
+        done < <(echo "$paths_raw" | grep -oP "'/[^']+'" | tr -d "'" || true)
+
+        # Built-in GNOME schemas (list-recursively takes one schema at a time)
+        if [[ -z "$conflict" ]]; then
+            local match
+            match=$(  { gsettings list-recursively org.gnome.shell.keybindings 2>/dev/null || true; \
+                        gsettings list-recursively org.gnome.desktop.wm.keybindings 2>/dev/null || true; } \
+                    | grep -i "<Super>v" | head -1 || true)
+            [[ -n "$match" ]] && conflict="a built-in GNOME keybinding"
+        fi
+    fi
+
+    # ── i3 ─────────────────────────────────────────────────────────────────────
+    if [[ -z "$conflict" ]]; then
+        for cfg in "$HOME/.config/i3/config" "$HOME/.i3/config"; do
+            [[ -f "$cfg" ]] || continue
+            # Resolve what $mod is set to in the config
+            local mod_val
+            mod_val=$(grep -iP '^\s*set\s+\$mod\s+' "$cfg" | \
+                      awk '{print $NF}' | head -1)
+            # Warn if $mod+v is bound and $mod resolves to Mod4/Super
+            if echo "$mod_val" | grep -qi "Mod4\|Super"; then
+                { grep -qiP '^\s*bindsym\s+\$mod\+v\b' "$cfg" && \
+                    conflict="i3 config (${cfg}): bindsym \$mod+v"; } || true
+            fi
+            # Also catch explicit Mod4+v / Super+v regardless of $mod
+            { grep -qiP '^\s*bindsym\s+(Mod4|Super)\+v\b' "$cfg" && \
+                conflict="i3 config (${cfg}): bindsym Mod4+v"; } || true
+        done
+    fi
+
+    # ── Sway ───────────────────────────────────────────────────────────────────
+    if [[ -z "$conflict" ]]; then
+        for cfg in "$HOME/.config/sway/config" "$HOME/.sway/config"; do
+            [[ -f "$cfg" ]] || continue
+            local mod_val
+            mod_val=$(grep -iP '^\s*set\s+\$mod\s+' "$cfg" | \
+                      awk '{print $NF}' | head -1 || true)
+            if echo "$mod_val" | grep -qi "Mod4\|Super"; then
+                { grep -qiP '^\s*bindsym\s+\$mod\+v\b' "$cfg" && \
+                    conflict="Sway config (${cfg}): bindsym \$mod+v"; } || true
+            fi
+            { grep -qiP '^\s*bindsym\s+(Mod4|Super)\+v\b' "$cfg" && \
+                conflict="Sway config (${cfg}): bindsym Mod4+v"; } || true
+        done
+    fi
+
+    # ── KDE ────────────────────────────────────────────────────────────────────
+    if [[ -z "$conflict" ]]; then
+        local kde_cfg="$HOME/.config/kglobalshortcutsrc"
+        if [[ -f "$kde_cfg" ]] && grep -qiP "Meta\+V" "$kde_cfg"; then
+            local kde_action
+            kde_action=$(grep -iP "Meta\+V" "$kde_cfg" | head -1 | cut -d= -f1)
+            conflict="KDE global shortcut: '${kde_action}'"
+        fi
+    fi
+
+    if [[ -n "$conflict" ]]; then
+        echo ""
+        echo -e "${YELLOW}┌─────────────────────────────────────────────────────────┐${NC}"
+        echo -e "${YELLOW}│  ⚠  Super+V conflict detected                           │${NC}"
+        echo -e "${YELLOW}│                                                         │${NC}"
+        printf  "${YELLOW}│  Already bound in: %-38s│${NC}\n" "$conflict"
+        echo -e "${YELLOW}│                                                         │${NC}"
+        echo -e "${YELLOW}│  The shortcut will be overwritten below. Change it in   │${NC}"
+        echo -e "${YELLOW}│  your DE settings if you want to keep both.             │${NC}"
+        echo -e "${YELLOW}└─────────────────────────────────────────────────────────┘${NC}"
+        echo ""
+    fi
+}
+
+check_superv_conflict
+
 section "Registering Super+V keyboard shortcut"
 
 BINDING_PATH="/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/clipboard-history/"
